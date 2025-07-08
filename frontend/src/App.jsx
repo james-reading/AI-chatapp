@@ -1,4 +1,5 @@
 import React, { useState, useRef } from 'react';
+import Markdown from 'react-markdown'
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -11,7 +12,7 @@ function App() {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ topic: message }),
+      body: JSON.stringify({ message }),
     })
 
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
@@ -76,8 +77,8 @@ function App() {
   const textareaRef = useRef(null);
 
   return (
-    <div className="max-w-4xl mx-auto py-16 px-4">
-      <div className="fixed top-18 left-18 w-128">
+    <div className="max-w-4xl mx-auto py-16 px-4 max-h-screen overflow-y-auto mb-48">
+      {/* <div className="fixed top-18 left-18 w-128">
         <textarea
           ref={textareaRef}
           readOnly
@@ -85,24 +86,24 @@ function App() {
           rows={40}
           className="w-full py-3 px-6 border border-gray-200 font-mono text-sm bg-gray-50"
         />
-      </div>
+      </div> */}
       <div>
         {messages.map((message, index) => {
           return message.type === "received" ? (
-            <div key={index} className="mt-8">
-              {message.text}
+            <div key={index} className="mt-8 prose">
+              <Markdown>{message.text}</Markdown>
             </div>
           ) : (
             <div key={index} className="text-right">
-              <span className="inline-block bg-gray-100 px-6 py-3 rounded-full">
+              <span className="inline-block bg-gray-100 px-6 py-3 rounded-full whitespace-pre-wrap">
                 {message.text}
               </span>
             </div>
           )
         })}
         {streamedText !== '' && (
-          <div className="mt-8">
-            {streamedText}
+          <div className="mt-8 prose">
+            <Markdown>{streamedText}</Markdown>
           </div>
         )}
       </div>
