@@ -12,7 +12,7 @@ function App() {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ message }),
+      body: JSON.stringify({ message, lab: JSON.parse(textareaRef.current.value) }),
     })
 
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
@@ -34,10 +34,15 @@ function App() {
           if (parsed.type === 'thinking') {
             thinkingText += parsed.content;
             setStreamedText(thinkingText);
-          } else if (parsed.type === 'question') {
-            // Question messages contain the JSON of the final question
-            if (textareaRef.current) {
-              textareaRef.current.value = JSON.stringify(parsed.content, null, 2);
+          } else if (parsed.type === 'tool') {
+            switch (parsed.name) {
+              case 'set_lab_requirements':
+                break;
+              case 'set_lab_title':
+                if (parsed.args) {
+                  textareaRef.current.value = JSON.stringify(parsed.args.lab, null, 2); // spacing level = 2
+                }
+                break
             }
           }
         }
@@ -59,9 +64,6 @@ function App() {
     // Clear the input message
     setInputMessage('');
 
-    // Clear the textarea
-    if (textareaRef.current) textareaRef.current.value = '';
-
     const receivedText = await chat(message);
 
     // Clear the streamed text after receiving the final response
@@ -76,17 +78,21 @@ function App() {
 
   const textareaRef = useRef(null);
 
+  const defaultQuiz = `{
+  "title": ""
+}
+  `;
+
   return (
     <div className="max-w-4xl mx-auto py-16 px-4 max-h-screen overflow-y-auto mb-48">
-      {/* <div className="fixed top-18 left-18 w-128">
+      <div className="fixed top-18 left-18 w-128">
         <textarea
           ref={textareaRef}
-          readOnly
-          placeholder="Generated question will appear here..."
           rows={40}
           className="w-full py-3 px-6 border border-gray-200 font-mono text-sm bg-gray-50"
+          defaultValue={defaultQuiz}
         />
-      </div> */}
+      </div>
       <div>
         {messages.map((message, index) => {
           return message.type === "received" ? (

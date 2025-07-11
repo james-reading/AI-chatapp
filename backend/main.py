@@ -8,17 +8,16 @@ from fastapi.responses import StreamingResponse
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
+from langchain_core.tools import tool, InjectedToolCallId
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, END, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
 
-from typing import List
-from typing_extensions import TypedDict
+from typing import Annotated
 
 from config.settings import Settings
-
-
-class Request(BaseModel):
-    message: str
 
 class LabRequirements(BaseModel):
     """Requirements needed to create a lab."""
@@ -26,8 +25,19 @@ class LabRequirements(BaseModel):
     topic: str = Field(description="The topic of the lab")
     target_persona: str = Field(description="Who s the lab for?")
     difficulty_level: int = Field(default=1, ge=1, le=7, description="Difficulty level of the lab")
-    LearningOutcomes: List[str]
 
+class Lab(BaseModel):
+    """A cybersecurity lab."""
+    title: str = Field(description="The title of the lab")
+
+class State(MessagesState):
+    step: str
+    requirements: LabRequirements
+    lab: Lab
+
+class RequestParams(BaseModel):
+    message: str
+    lab: Lab
 
 app = FastAPI()
 
@@ -40,17 +50,43 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-llm = init_chat_model("gpt-4o-mini", model_provider="openai", api_key=Settings().openai_api_key)
-llm_with_tool = llm.bind_tools([LabRequirements])
+llm = init_chat_model("gpt-4.1", model_provider="openai", api_key=Settings().openai_api_key)
 
-template = """Your job is to collect requirements from a user about the type of lab they want to create.
+@tool
+def set_lab_requirements(
+    requirements: LabRequirements,
+    tool_call_id: Annotated[str, InjectedToolCallId]
+) -> Command:
+    """Update lab requirements."""
+    return Command(update={
+        "requirements": requirements,
+        "messages": [
+            ToolMessage(f"Updated requirements", tool_call_id=tool_call_id)
+        ]
+    })
+
+@tool
+def set_lab_title(
+    lab: Lab,
+    tool_call_id: Annotated[str, InjectedToolCallId]
+) -> Command:
+    """Update lab title."""
+    return Command(update={
+        "lab": lab,
+        "messages": [
+            ToolMessage(f"Updated lab title", tool_call_id=tool_call_id)
+        ]
+    })
+
+def gather_requirements(state):
+    print("Node: gather_requirements")
+    template = """Your job is to collect requirements from a user about the type of lab they want to create.
 
 You should get the following information from them:
 
 - Topic - What subject will the lab cover?
 - Target Persona - Who is the lab for?
 - Difficulty Level - What is the difficulty level of the lab? (1-7)
-- Learning Outcomes - What should participants learn?
 
 If you are not able to discern this info, ask them to clarify! Do not attempt to wildly guess.
 
@@ -60,82 +96,119 @@ If the user asks something unrelated to the lab requirements, respond kindly but
 
 Respond using Markdown formatting where appropriate."""
 
-prompt_system = """Based on the following requirements, generate a good title and description for the lab.:
-
-{reqs}"""
-
-
-def info_chain(state):
     messages = [SystemMessage(content=template)] + state["messages"]
+    llm_with_tool = llm.bind_tools([set_lab_requirements])
     response = llm_with_tool.invoke(messages)
     return {"messages": [response]}
 
-# Function to get the messages for the prompt
-# Will only get messages AFTER the tool call
-def get_prompt_messages(messages: list):
-    tool_call = None
-    other_msgs = []
-    for m in messages:
-        if isinstance(m, AIMessage) and m.tool_calls:
-            tool_call = m.tool_calls[0]["args"]
-        elif isinstance(m, ToolMessage):
-            continue
-        elif tool_call is not None:
-            other_msgs.append(m)
-    return [SystemMessage(content=prompt_system.format(reqs=tool_call))] + other_msgs
+def generate_title(state):
+    print("Node: generate_title")
+    template = """Based on the following requirements, generate a good title for the lab.:
 
-def prompt_gen_chain(state):
-    messages = get_prompt_messages(state["messages"])
-    response = llm.invoke(messages)
+{reqs}"""
+
+    print("Generating title with requirements:", state["requirements"])
+
+    messages = [SystemMessage(content=template.format(reqs=state["requirements"]))]
+    llm_with_tool = llm.bind_tools([set_lab_title], tool_choice="set_lab_title")
+    response = llm_with_tool.invoke(messages)
     return {"messages": [response]}
 
-def add_tool_message(state: MessagesState):
-    return {
-        "messages": [
-            ToolMessage(
-                content="Prompt generated!",
-                tool_call_id=state["messages"][-1].tool_calls[0]["id"],
-            )
-        ]
-    }
+def explain_title(state):
+    print("Node: explain_title")
+    template = """You have just generated a title of a lab based on the user's requirements.
+Acknowledge this, and tell the user they can ask for any changes they would like to make or if you should proceed with the lab creation process.
 
-def get_state(state):
-    messages = state["messages"]
-    if isinstance(messages[-1], AIMessage) and messages[-1].tool_calls:
-        return "add_tool_message"
-    elif not isinstance(messages[-1], HumanMessage):
+The requirements were:
+{reqs}
+
+The generated lab:
+{lab}"""
+    content = template.format(reqs=state["requirements"], lab=state["lab"])
+
+    messages = [SystemMessage(content=content)]
+    response = llm.invoke(messages)
+    return {"messages": [response], "step": "title_feedback"}
+
+def title_feedback(state):
+    print("Node: title_feedback")
+    template = """You have just generated a title for a lab based on the user's requirements, and asked for feedback.
+
+    You should now respond to the user's feedback.
+
+    If the user requests changes, you should respond with the appropriate tool call.
+
+    If the user is satisfied with the title, you should respond with "Great! Let's proceed with creating the lab.
+
+    If the user requests changes that are not related to the original requirements, kindly remind them that your job is to assist with feedback on the lab title, and that if they are happy they should request to move on.
+
+    If they respond with something unrelated title feedback, kindly remind them that your job is to assist with feedback on the lab title, and that if they are happy they should request to move on."
+
+The requirements were:
+{reqs}
+
+The generated lab:
+{lab}"""
+    content = template.format(reqs=state["requirements"], lab=state["lab"])
+
+    messages = [SystemMessage(content=content)] + state["messages"]
+    llm_with_tool = llm.bind_tools([set_lab_title])
+    response = llm_with_tool.invoke(messages)
+    print(response)
+    return {"messages": [response]}
+
+def after_gather_requirements(state):
+    if state.get("requirements") is None:
         return END
-    return "info"
+    return "generate_title"
+
+def router(state):
+    print("Router state:", state.get("step", ""))
+    return state.get("step", "gather_requirements")
 
 
-workflow = StateGraph(MessagesState)
-workflow.add_node("info", info_chain)
-workflow.add_node("prompt", prompt_gen_chain)
-workflow.add_node("add_tool_message", add_tool_message)
+workflow = StateGraph(State)
+workflow.add_node("gather_requirements", gather_requirements)
+workflow.add_node("set_requirements", ToolNode([set_lab_requirements]))
+workflow.add_node("generate_title", generate_title)
+workflow.add_node("set_title", ToolNode([set_lab_title]))
+workflow.add_node("set_title_feedback", ToolNode([set_lab_title]))
+workflow.add_node("explain_title", explain_title)
+workflow.add_node("title_feedback", title_feedback)
 
-workflow.add_conditional_edges("info", get_state, ["add_tool_message", "info", END])
-workflow.add_edge("add_tool_message", "prompt")
-workflow.add_edge("prompt", END)
-workflow.add_edge(START, "info")
+workflow.add_conditional_edges(START, router, ["gather_requirements", "title_feedback"])
+workflow.add_edge("gather_requirements", "set_requirements")
+workflow.add_conditional_edges("set_requirements", after_gather_requirements, ["generate_title", END])
+workflow.add_edge("generate_title", "set_title")
+workflow.add_edge("set_title", "explain_title")
+workflow.add_edge("explain_title", END)
+workflow.add_edge("title_feedback", "set_title_feedback")
+workflow.add_edge("set_title_feedback", END)
 
-
-# Add memory
 memory = MemorySaver()
 
-async def stream_response(message: str):
+async def stream_response(request: RequestParams):
     graph = workflow.compile(checkpointer=memory)
+    config = {"configurable": {"thread_id": "1"}}
+    input_messages = [HumanMessage(request.message)]
 
-    config = {"configurable": {"thread_id": "5"}}
+    async for stream_mode, step in graph.astream({"messages": input_messages, "lab": request.lab}, config, stream_mode=["messages", "values"]):
+        if stream_mode == "messages":
+            message = step[0]
+            if isinstance(message, AIMessage):
+                if message.tool_calls:
+                    for tool_call in message.tool_calls:
+                        yield f"data: {json.dumps({'type': 'tool', 'name': tool_call['name'], 'id': tool_call['id']})}\n\n"
+                elif message.tool_call_chunks:
+                    continue
+                else:
+                    yield f"data: {json.dumps({'type': 'thinking', 'content': step[0].content})}\n\n"
 
-    input_messages = [HumanMessage(message)]
-
-    # Stream the workflow execution using messages mode
-    async for message, metadata in graph.astream({"messages": input_messages}, config, stream_mode="messages"):
-
-            # Check if it's an AI message with content
-        yield f"data: {json.dumps({'type': 'thinking', 'content': message.content})}\n\n"
-
-
+        if stream_mode == "values":
+            last_message = step['messages'][-1]
+            if isinstance(last_message, AIMessage) and last_message.tool_calls:
+                for tool_call in last_message.tool_calls:
+                        yield f"data: {json.dumps({'type': 'tool', 'name': tool_call['name'], 'id': tool_call['id'], 'args': tool_call['args']})}\n\n"
 @app.post("/")
-async def chat(request: Request):
-    return StreamingResponse(stream_response(request.message), media_type="text/event-stream")
+async def chat(request: RequestParams):
+    return StreamingResponse(stream_response(request), media_type="text/event-stream")
