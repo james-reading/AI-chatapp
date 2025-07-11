@@ -2,9 +2,11 @@ import React, { useState, useRef } from 'react';
 import Markdown from 'react-markdown'
 
 function App() {
-  const [messages, setMessages] = useState([]);
   const [inputMessage, setInputMessage] = useState('');
-  const [streamedText, setStreamedText] = useState('');
+  const [messages, setMessages] = useState([]);
+  const [messageDetails, setMessageDetails] = useState("");
+  const [selectedMessage, setSelectedMessage] = useState(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   async function chat(message) {
     const response = await fetch("http://127.0.0.1:8000", {
@@ -12,44 +14,11 @@ function App() {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ message, lab: JSON.parse(textareaRef.current.value) }),
+      body: JSON.stringify({ message }),
     })
 
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
-    let thinkingText = '';
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) {
-        console.log('Stream finished');
-        break;
-      };
-
-      value.split('\n').forEach((line) => {
-        if (line.trim() && line.startsWith('data: ')) {
-          const jsonData = line.substring(6); // Remove 'data: ' prefix
-          const parsed = JSON.parse(jsonData);
-
-          // Thinking messages need to be streamed to the chat area
-          if (parsed.type === 'thinking') {
-            thinkingText += parsed.content;
-            setStreamedText(thinkingText);
-          } else if (parsed.type === 'tool') {
-            switch (parsed.name) {
-              case 'set_lab_requirements':
-                break;
-              case 'set_lab_title':
-                if (parsed.args) {
-                  textareaRef.current.value = JSON.stringify(parsed.args.lab, null, 2); // spacing level = 2
-                }
-                break
-            }
-          }
-        }
-      });
-    }
-
-    return thinkingText;
+    const body = await response.json();
+    setMessages(body.messages);
   }
 
   const sendMessage = async (e) => {
@@ -57,23 +26,19 @@ function App() {
 
     if (!inputMessage.trim()) return;
 
-    // Add the sent message to the chat
-    setMessages([...messages, { text: inputMessage, type: "sent" }]);
+    const receivedText = await chat(inputMessage);
 
-    const message = inputMessage
-    // Clear the input message
     setInputMessage('');
+  };
 
-    const receivedText = await chat(message);
+  const openModal = (message) => {
+    setSelectedMessage(message);
+    setIsModalOpen(true);
+  };
 
-    // Clear the streamed text after receiving the final response
-    setStreamedText('');
-
-    // Add the final response to the chat
-    setMessages((prevMessages) => [
-      ...prevMessages,
-      { text: receivedText, type: "received" }
-    ]);
+  const closeModal = () => {
+    setIsModalOpen(false);
+    setSelectedMessage(null);
   };
 
   const textareaRef = useRef(null);
@@ -95,23 +60,37 @@ function App() {
       </div>
       <div>
         {messages.map((message, index) => {
-          return message.type === "received" ? (
-            <div key={index} className="mt-8 prose">
-              <Markdown>{message.text}</Markdown>
-            </div>
-          ) : (
-            <div key={index} className="text-right">
-              <span className="inline-block bg-gray-100 px-6 py-3 rounded-full whitespace-pre-wrap">
-                {message.text}
-              </span>
-            </div>
-          )
+          switch (message.type) {
+            case 'human':
+              return (
+                <div key={index} className="text-right">
+                  <span className="inline-block bg-gray-100 px-6 py-3 rounded-full whitespace-pre-wrap">
+                    {message.content}
+                  </span>
+                </div>
+              )
+            default:
+              return (
+                <div key={index}>
+                  <div className="flex gap-2">
+                    <div
+                      className="bg-gray-900 text-white text-sm px-3 py-1 rounded-full uppercase cursor-pointer hover:bg-gray-700 transition-colors"
+                      onClick={() => openModal(message)}
+                    >
+                      {message.type}
+                    </div>
+
+                    <div className="bg-gray-900 text-white text-sm px-3 py-1 rounded-full">
+                      {`Tool calls: ${message.tool_calls?.length}`}
+                    </div>
+                  </div>
+                  <div className="mt-8 prose">
+                    <Markdown>{message.content}</Markdown>
+                  </div>
+                </div>
+              )
+          }
         })}
-        {streamedText !== '' && (
-          <div className="mt-8 prose">
-            <Markdown>{streamedText}</Markdown>
-          </div>
-        )}
       </div>
       <form
         onSubmit={sendMessage}
@@ -127,6 +106,15 @@ function App() {
           Send
         </button>
       </form>
+
+      {/* Modal */}
+      {isModalOpen && (
+        <div className="fixed inset-0 flex backdrop-blur-sm items-center justify-center z-50" onClick={closeModal}>
+          <pre className="bg-gray-100 m-28 p-4 rounded-lg overflow-auto text-sm">
+            {JSON.stringify(selectedMessage, null, 2)}
+          </pre>
+        </div>
+      )}
 
     </div>
   );
