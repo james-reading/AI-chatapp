@@ -13,6 +13,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, END, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, InjectedState
 from langgraph.types import Command
+from langgraph.config import get_stream_writer
 
 from config.settings import Settings
 
@@ -41,7 +42,7 @@ class Question(BaseModel):
 
 @tool
 def create_question(
-    question: str,
+    question: Question,
     tool_call_id: Annotated[str, InjectedToolCallId]
 ) -> "Command":
     """Set the lab requirements."""
@@ -51,14 +52,37 @@ def create_question(
         ]
     })
 
-async def chat(state: MessagesState) -> MessagesState:
-    template = """If the user requests a question on a specific topic, create a question by calling the tool
+@tool
+def transfer_to_story_agent(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
+    """Transfer to story agent."""
+    return Command(
+        goto="story",
+        update={
+            "messages": [
+                ToolMessage(f"Transferred to story agent", tool_call_id=tool_call_id)
+            ]
+        }
+    )
 
-After calling the tool, DO NOT repeat the question, just ask if they would like another"""
+async def chat(state: MessagesState) -> MessagesState:
+    print("CHAT NODE")
+    template = """If the user requests a question on a specific topic, create a question by calling the `create_question` tool
+
+If the user requests a story, transfer to the `story` agent by calling the `transfer_to_story_agent` tool"""
 
     messages = [SystemMessage(content=template)] + state["messages"]
-    llm_with_tool = llm.bind_tools([create_question])
+    llm_with_tool = llm.bind_tools([create_question, transfer_to_story_agent])
     response = await llm_with_tool.ainvoke(messages)
+    return {"messages": [response]}
+
+async def story(state: MessagesState) -> MessagesState:
+    writer = get_stream_writer()
+    template = """Write a very short story about trees"""
+
+    messages = [SystemMessage(content=template)] + state["messages"]
+    writer({"type": "story", "key": "Story start", "id": "123"})
+    response = await llm.ainvoke(messages, {"metadata": {"foo": {"type": "story", "id": "123"}}})
+    writer({"type": "story", "key": "Story end", "id": "123"})
     return {"messages": [response]}
 
 def should_continue(state):
@@ -70,11 +94,13 @@ def should_continue(state):
 
 workflow = StateGraph(MessagesState)
 workflow.add_node("chat", chat)
-workflow.add_node("tools", ToolNode([create_question]))
+workflow.add_node("story", story)
+workflow.add_node("tools", ToolNode([create_question, transfer_to_story_agent]))
 
 workflow.add_edge(START, "chat")
 workflow.add_conditional_edges("chat", should_continue, ["tools", END])
-workflow.add_edge("tools", "chat")
+workflow.add_edge("tools", END)
+workflow.add_edge("story", END)
 
 memory = MemorySaver()
 
@@ -83,11 +109,38 @@ async def stream_response(request: RequestParams):
     config = {"configurable": {"thread_id": request.thread_id}}
     input_messages = [HumanMessage(request.message)]
 
-    async for chunk, metadata in graph.astream({"messages": input_messages}, config, stream_mode="messages"):
-        if isinstance(chunk, AIMessageChunk):
-            print(chunk.tool_call_chunks)
-            # Yield each chunk as a JSON object
-        yield f"{json.dumps({'type': 'stream', 'token': chunk.content})}\n"
+    first = True
+    async for stream_mode, chunk in graph.astream({"messages": input_messages}, config, stream_mode=["messages", "updates", "custom"]):
+        print("---")
+        if stream_mode == "messages":
+            (message, metadata) = chunk
+
+            if isinstance(message, AIMessageChunk):
+                if message.tool_call_chunks:
+                    # print("tool_call_chunks")
+                    # print(message.tool_call_chunks)
+                    if first:
+                        gathered = message
+                        first = False
+                    else:
+                        gathered = gathered + message
+
+                    for tool_call_chunk in message.tool_call_chunks:
+                        yield f"{json.dumps(gathered.tool_calls[tool_call_chunk['index']])}\n"
+                else:
+                    print("NO tool_call_chunks")
+                    first = True
+
+                    if metadata.get("foo", {}).get("type") == "story":
+                        yield f"{json.dumps({'type': 'story', 'token': message.content})}\n"
+                    else:
+                        yield f"{json.dumps({'type': 'stream', 'token': message.content})}\n"
+
+        elif stream_mode == "updates":
+            print(chunk)
+        elif stream_mode == "custom":
+            print("Custom stream mode:")
+            print(chunk)
 
 
 @app.post("/")
