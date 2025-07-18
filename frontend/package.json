@@ -10,6 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@langchain/core": "^0.3.63",
+    "@langchain/langgraph-sdk": "^0.0.96",
     "@tailwindcss/typography": "^0.5.16",
     "@tailwindcss/vite": "^4.1.11",
     "react": "^19.1.0",

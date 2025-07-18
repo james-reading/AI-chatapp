@@ -1,104 +1,85 @@
-import React, { useState, useRef } from 'react';
-import Markdown from 'react-markdown';
+import { useStream } from "./stream.js";
 
-function App() {
-  const threadId = useRef(); // Generate a unique thread ID
-  const [messages, setMessages] = useState([]);
-  const [inputMessage, setInputMessage] = useState('');
-  const [streamedText, setStreamedText] = useState('');
+export default function App() {
+  const params = new URLSearchParams(window.location.search);
+  const thread = useStream({
+    apiUrl: "http://localhost:8000",
+    threadId: params.get("threadId") || Date.now().toString()
+  });
 
-  async function chat(message) {
-    const response = await fetch("http://127.0.0.1:8000", {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ message, thread_id: threadId.current.value })
-    })
-
-    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
-
-    let finalText = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      value.split('\n').forEach(line => {
-        line = line.trim();
-        if (!line) return;
-
-        const data = JSON.parse(line);
-
-        if (data.type === 'stream') {
-          finalText += data.token;
-          setStreamedText(finalText);
-        }
-      });
-    }
-
-    return finalText;
-  }
-
-  const sendMessage = async (e) => {
-    e.preventDefault();
-
-    const currentMessage = inputMessage.trim();
-    if (!currentMessage) return;
-
-    // Add the sent message to the chat
-    setMessages([...messages, { text: currentMessage, type: "sent" }]);
-    setInputMessage('');
-
-    const finalText = await chat(currentMessage);
-
-    setStreamedText('');
-    setMessages(prevMessages => [
-      ...prevMessages,
-      { text: finalText, type: "received" }
-    ]);
-
-  };
+  const lastJoke = thread.values.ui?.find(ui => ui.name === "joke");
 
   return (
-    <div className="max-w-5xl mx-auto py-16 px-4 max-h-screen overflow-y-auto mb-48">
-      <div className="flex justify-center text xs text-gray-500 mb-8">
-        <span className="mr-2">Thread ID:</span>
-        <input ref={threadId} type="text" defaultValue={Date.now().toString()} />
-      </div>
-      {messages.map((message, index) => {
-        return message.type === "received" ? (
-          <div key={index} className="mt-8 prose">
-            <Markdown>{message.text}</Markdown>
-          </div>
-        ) : (
-          <div key={index} className="text-right">
-            <span className="inline-block bg-gray-100 px-6 py-3 rounded-full whitespace-pre-wrap">
-              {message.text}
-            </span>
-          </div>
-        )
-      })}
-      {streamedText !== '' && (
-        <div className="mt-8 prose">
-          <Markdown>{streamedText}</Markdown>
+    <div className="max-w-4xl mx-auto px-8 bg-white">
+      {lastJoke && (
+        <div className="fixed top-0 left-0 bg-white m-8 p-4 whitespace-pre-wrap max-w-xl">
+          <div className="text-lg font-bold mb-2">Current Joke</div>
+          {JSON.stringify(lastJoke, null, 2)}
         </div>
       )}
-      <form
-        onSubmit={sendMessage}
-        className="max-w-4xl mx-auto p-4 flex gap-x-4 fixed bottom-0 left-0 right-0 mb-24">
-        <input
-          type="text"
-          placeholder="Type your message here..."
-          value={inputMessage}
-          onChange={(e) => setInputMessage(e.target.value)}
-          className="w-full py-3 px-6 border border-gray-200 rounded-full"
-        />
-        <button className="cursor-pointer bg-gray-100 py-3 px-6 rounded-full">
-          Send
-        </button>
-      </form>
+      <div className="h-screen max-h-screen flex flex-col" >
+        <div className="grow overflow-y-auto mt-16">
+          {thread.messages.map((message) => (
+            <div key={message.id}>
+              {message.type === "human" ? (
+                <div className="text-right mb-8">
+                  <span className="inline-block bg-gray-100 px-6 py-3 rounded-full">{message.content}</span>
+                </div>
+              ) : (
+                <div className="mb-8">
+                  <div>{message.content}</div>
+                  {thread.values.ui?.filter((ui) => ui.metadata?.message_id === message.id).map((ui) => {
+                    switch (ui.name) {
+                      case "web_search":
+                        return (
+                          <div key={ui.id} className="">
+                            <span className="inline-block bg-gray-900 text-white px-4 py-2 rounded-full">
+                              Web Search: {ui.props.query}
+                            </span>
+                            {ui.metadata?.complete && (
+                              <span className="ml-2">Done!</span>
+                            )}
+                          </div>
+                        );
+                      case "joke":
+                        return (
+                          <div key={ui.id} className="">
+                            <span className="inline-block bg-gray-900 text-white px-4 py-2 rounded-full">
+                              {ui.metadata?.complete ? "Joke told ✅" : "Telling a joke..."}
+                            </span>
+                          </div>
+                        );
+                      default:
+                        return JSON.stringify(ui, null, 2);
+                    }
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <form className="flex gap-x-4 mb-16"
+          onSubmit={(e) => {
+            e.preventDefault();
+
+            const form = e.target
+            const message = new FormData(form).get("message");
+
+            form.reset();
+            thread.submit({ message });
+          }}
+        >
+          <input
+            type="text"
+            placeholder="Type your message here..."
+            name="message"
+            className="w-full py-3 px-6 border border-gray-200 rounded-full"
+          />
+
+          <button className="cursor-pointer bg-gray-100 py-3 px-6 rounded-full" type="submit">Send</button>
+        </form>
+      </div>
     </div>
   );
 }
-
-export default App;

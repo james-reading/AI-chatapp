@@ -1,5 +1,5 @@
-import json
-from typing import Annotated
+import json, asyncio
+from typing import Annotated, Sequence, TypedDict
 from pydantic import BaseModel, Field
 
 from fastapi import FastAPI
@@ -7,13 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from langchain.chat_models import init_chat_model
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessageChunk
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage, AIMessageChunk, BaseMessage
 from langchain_core.tools import tool, InjectedToolCallId
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import START, END, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, InjectedState
 from langgraph.types import Command
 from langgraph.config import get_stream_writer
+from langgraph.graph.message import add_messages
+from langgraph.graph.ui import AnyUIMessage, ui_message_reducer, push_ui_message
+from langchain.load.dump import dumps
 
 from config.settings import Settings
 
@@ -32,58 +35,81 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
-llm = init_chat_model("gpt-4.1", model_provider="openai", api_key=Settings().openai_api_key)
+model = init_chat_model("gpt-4.1", model_provider="openai", api_key=Settings().openai_api_key)
 
-class Question(BaseModel):
-    """A multiple choice question."""
-    title: str = Field(..., description="The question title")
-    options: list[str] = Field(..., description="The options for the question")
-    correct_option_index: int = Field(..., description="The index of the correct option, starting from 0")
+class AgentState(TypedDict):  # noqa: D101
+    messages: Annotated[Sequence[BaseMessage], add_messages]
+    ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
 
 @tool
-def create_question(
-    question: Question,
-    tool_call_id: Annotated[str, InjectedToolCallId]
-) -> "Command":
-    """Set the lab requirements."""
-    return Command(update={
-        "messages": [
-            ToolMessage(f"Question created successfully", tool_call_id=tool_call_id)
-        ]
-    })
+async def search_the_web(
+    query: Annotated[str, "The search query"],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[AgentState, InjectedState]
+) -> int:
+    """Search the web"""
 
-@tool
-def transfer_to_story_agent(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
-    """Transfer to story agent."""
+    messages = state["messages"]
+    calling_message = messages[-1]  # The last message should be the AI message with tool calls
+
+    ui_message = push_ui_message("web_search", {"query": query}, message=calling_message)
+
+    await asyncio.sleep(2)
+
+    push_ui_message("web_search", {}, id=ui_message["id"], message=calling_message, merge=True, metadata={"complete": True})
+
     return Command(
-        goto="story",
-        update={
-            "messages": [
-                ToolMessage(f"Transferred to story agent", tool_call_id=tool_call_id)
-            ]
-        }
+        update={"messages": [ToolMessage("No results", tool_call_id=tool_call_id)]},
     )
 
-async def chat(state: MessagesState) -> MessagesState:
-    print("CHAT NODE")
-    template = """If the user requests a question on a specific topic, create a question by calling the `create_question` tool
+@tool
+async def tell_joke(
+    topic: Annotated[str, "The topic of the joke"],
+    tool_call_id: Annotated[str, InjectedToolCallId],
+    state: Annotated[AgentState, InjectedState]
+) -> int:
+    """Tell a joke on a given topic"""
+    # Get the message that called this tool
+    messages = state["messages"]
+    calling_message = messages[-1]  # The last message should be the AI message with tool calls
 
-If the user requests a story, transfer to the `story` agent by calling the `transfer_to_story_agent` tool"""
+    ui_message = push_ui_message("joke", {"topic": topic}, message=calling_message)
 
-    messages = [SystemMessage(content=template)] + state["messages"]
-    llm_with_tool = llm.bind_tools([create_question, transfer_to_story_agent])
-    response = await llm_with_tool.ainvoke(messages)
-    return {"messages": [response]}
+    content_stream = model.with_config({"tags": ["nostream"]}).astream(
+        f"Create a short joke on the topic: {topic}"
+    )
 
-async def story(state: MessagesState) -> MessagesState:
-    writer = get_stream_writer()
-    template = """Write a very short story about trees"""
+    content = None
+    async for chunk in content_stream:
+        content = content + chunk if content else chunk
 
-    messages = [SystemMessage(content=template)] + state["messages"]
-    writer({"type": "story", "key": "Story start", "id": "123"})
-    response = await llm.ainvoke(messages, {"metadata": {"foo": {"type": "story", "id": "123"}}})
-    writer({"type": "story", "key": "Story end", "id": "123"})
-    return {"messages": [response]}
+        push_ui_message(
+            "joke",
+            {"content": content.text()},
+            id=ui_message["id"],
+            message=calling_message,
+            merge=True,
+        )
+
+    push_ui_message(
+        "joke",
+        {"content": content.text()},
+        message=calling_message,
+        id=ui_message["id"],
+        metadata={"complete": True},
+    )
+
+    return Command(
+        update={"messages": [ToolMessage(content, tool_call_id=tool_call_id)]},
+    )
+
+async def chat(state: AgentState):
+    content = """You tell jokes. If the user asks you to tell a joke, you MUST call the `tell_joke` tool."""
+    messages = [SystemMessage(content=content)] + state["messages"]
+    model_with_tools = model.bind_tools([tell_joke, search_the_web])
+    message = await model_with_tools.ainvoke(messages)
+    print(message.tool_calls)
+    return {"messages": [message]}
 
 def should_continue(state):
     messages = state["messages"]
@@ -92,57 +118,45 @@ def should_continue(state):
         return "tools"
     return END
 
-workflow = StateGraph(MessagesState)
-workflow.add_node("chat", chat)
-workflow.add_node("story", story)
-workflow.add_node("tools", ToolNode([create_question, transfer_to_story_agent]))
+workflow = StateGraph(AgentState)
+workflow.add_node(chat)
+workflow.add_node("tools", ToolNode([tell_joke, search_the_web]))
 
 workflow.add_edge(START, "chat")
 workflow.add_conditional_edges("chat", should_continue, ["tools", END])
 workflow.add_edge("tools", END)
-workflow.add_edge("story", END)
 
 memory = MemorySaver()
+graph = workflow.compile(checkpointer=memory)
+
+def config(thread_id):
+    return {"configurable": {"thread_id": thread_id}}
+
+def serialize_values(values):
+    messages = [message.dict() for message in values.get("messages", []) if not isinstance(message, ToolMessage)]
+    ui = values.get("ui", [])
+    return {"messages": messages, "ui": ui}
 
 async def stream_response(request: RequestParams):
-    graph = workflow.compile(checkpointer=memory)
-    config = {"configurable": {"thread_id": request.thread_id}}
     input_messages = [HumanMessage(request.message)]
 
-    first = True
-    async for stream_mode, chunk in graph.astream({"messages": input_messages}, config, stream_mode=["messages", "updates", "custom"]):
-        print("---")
+    async for stream_mode, chunk in graph.astream({"messages": input_messages}, config(request.thread_id), stream_mode=["messages", "values", "custom"]):
         if stream_mode == "messages":
             (message, metadata) = chunk
 
-            if isinstance(message, AIMessageChunk):
-                if message.tool_call_chunks:
-                    # print("tool_call_chunks")
-                    # print(message.tool_call_chunks)
-                    if first:
-                        gathered = message
-                        first = False
-                    else:
-                        gathered = gathered + message
+            yield f"event: messages\ndata:{json.dumps([message.dict(), metadata])}\n\n"
 
-                    for tool_call_chunk in message.tool_call_chunks:
-                        yield f"{json.dumps(gathered.tool_calls[tool_call_chunk['index']])}\n"
-                else:
-                    print("NO tool_call_chunks")
-                    first = True
+        elif stream_mode == "values":
+            yield f"event: values\ndata:{json.dumps(serialize_values(chunk))}\n\n"
 
-                    if metadata.get("foo", {}).get("type") == "story":
-                        yield f"{json.dumps({'type': 'story', 'token': message.content})}\n"
-                    else:
-                        yield f"{json.dumps({'type': 'stream', 'token': message.content})}\n"
-
-        elif stream_mode == "updates":
-            print(chunk)
         elif stream_mode == "custom":
-            print("Custom stream mode:")
-            print(chunk)
-
+            yield f"event: custom\ndata:{json.dumps(chunk)}\n\n"
 
 @app.post("/")
 async def chat(request: RequestParams):
     return StreamingResponse(stream_response(request), media_type="text/event-stream")
+
+@app.get("/thread/{thread_id}")
+async def get_thread(thread_id: str):
+    state = graph.get_state(config(thread_id))
+    return serialize_values(state.values)
