@@ -1,20 +1,22 @@
+import { useState } from "react";
+
 import { useStream } from "./stream.js";
+
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
+  const [uiPreview, setUiPreview] = useState();
   const thread = useStream({
     apiUrl: "http://localhost:8000",
-    threadId: params.get("threadId") || Date.now().toString()
+    threadId: params.get("threadId") || Date.now().toString(),
+    onUIEvent: (event) => setUiPreview(event)
   });
-
-  const lastJoke = thread.values.ui?.find(ui => ui.name === "joke");
 
   return (
     <div className="max-w-4xl mx-auto px-8 bg-white">
-      {lastJoke && (
+      {uiPreview && (
         <div className="fixed top-0 left-0 bg-white m-8 p-4 whitespace-pre-wrap max-w-xl">
-          <div className="text-lg font-bold mb-2">Current Joke</div>
-          {JSON.stringify(lastJoke, null, 2)}
+          {JSON.stringify(uiPreview, null, 2)}
         </div>
       )}
       <div className="h-screen max-h-screen flex flex-col" >

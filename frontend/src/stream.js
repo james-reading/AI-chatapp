@@ -16,15 +16,17 @@ function messageReducer(state, event) {
 function uiMessageReducer(state, event) {
   const index = state.findIndex((ui) => ui.id === event.id);
 
+  let processedEvent;
   if (index !== -1) {
-    state[index] =
-      event.metadata.merge
-        ? { ...event, props: { ...state[index].props, ...event.props } }
-        : event;
+    processedEvent = event.metadata.merge
+      ? { ...event, props: { ...state[index].props, ...event.props } }
+      : event;
+    state[index] = processedEvent;
   } else {
-    state.push(event);
+    processedEvent = event;
+    state.push(processedEvent);
   }
-  return state;
+  return { state, processedEvent };
 }
 
 export function useStream(options) {
@@ -51,9 +53,15 @@ export function useStream(options) {
         switch (data.type) {
           case "ui":
             setValues(values => {
-              const ui = uiMessageReducer(values.ui ?? [], data);
+              const { state: ui, processedEvent } = uiMessageReducer(values.ui ?? [], data);
+
+              if (options.onUIEvent) {
+                options.onUIEvent(processedEvent);
+              }
+
               return { ...values, ui };
             });
+
             break;
           default:
             console.warn("Unknown custom event type:", data.type);
