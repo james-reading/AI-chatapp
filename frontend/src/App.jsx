@@ -1,29 +1,38 @@
 import { useState } from "react";
 
 import { useStream } from "./stream.js";
+import Question from "./Question";
 
 
 export default function App() {
   const params = new URLSearchParams(window.location.search);
-  const [uiPreview, setUiPreview] = useState();
+
   const thread = useStream({
     apiUrl: "http://localhost:8000",
-    threadId: params.get("threadId") || Date.now().toString(),
-    onUIEvent: (event) => setUiPreview(event)
+    threadId: params.get("threadId") || Date.now().toString()
   });
+
+  const currentStory = thread.values.ui?.find((ui) => ui.name === "story");
 
   return (
     <div className="max-w-4xl mx-auto px-8 bg-white">
-      {uiPreview && (
+      {currentStory && (
         <div className="fixed top-0 left-0 bg-white m-8 p-4 whitespace-pre-wrap max-w-xl">
-          {JSON.stringify(uiPreview, null, 2)}
+          <div>
+            <div className="mb-8">
+              {currentStory.props.complete ? "Done ✅" : "Writing story..."}
+            </div>
+            <div>
+              {currentStory.props.content}
+            </div>
+          </div>
         </div>
       )}
       <div className="h-screen max-h-screen flex flex-col" >
         <div className="grow overflow-y-auto mt-16">
-          {thread.messages.map((message) => (
+          {thread.messages.map((message,) => (
             <div key={message.id}>
-              {message.type === "human" ? (
+              {message.type === "HumanMessage" ? (
                 <div className="text-right mb-8">
                   <span className="inline-block bg-gray-100 px-6 py-3 rounded-full">{message.content}</span>
                 </div>
@@ -32,22 +41,18 @@ export default function App() {
                   <div>{message.content}</div>
                   {thread.values.ui?.filter((ui) => ui.metadata?.message_id === message.id).map((ui) => {
                     switch (ui.name) {
-                      case "web_search":
+                      case "question":
                         return (
-                          <div key={ui.id} className="">
-                            <span className="inline-block bg-gray-900 text-white px-4 py-2 rounded-full">
-                              Web Search: {ui.props.query}
-                            </span>
-                            {ui.metadata?.complete && (
-                              <span className="ml-2">Done!</span>
-                            )}
-                          </div>
+                          <Question
+                            key={ui.id}
+                            props={ui.props}
+                          />
                         );
-                      case "joke":
+                      case "story":
                         return (
                           <div key={ui.id} className="">
                             <span className="inline-block bg-gray-900 text-white px-4 py-2 rounded-full">
-                              {ui.metadata?.complete ? "Joke told ✅" : "Telling a joke..."}
+                              {ui.props.complete ? "Created story ✅" : "Writing story..."}
                             </span>
                           </div>
                         );

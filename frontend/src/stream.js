@@ -2,31 +2,48 @@ import { useEffect, useState } from "react";
 
 import { Client } from "./client.js";
 
-function messageReducer(state, event) {
-  const message = state.find((message) => message.id === event.id);
+function messageReducer(messages, newMessage) {
+  const message = messages.find(m => m.id === newMessage.id);
 
   if (message) {
-    message.content += event.content;
+    message.content += newMessage.content;
   } else {
-    state.push(event);
+    messages.push({
+      id: newMessage.id,
+      type: "AIMessage",
+      content: newMessage.content,
+    });
   }
-  return state;
+  return messages;
 }
 
-function uiMessageReducer(state, event) {
-  const index = state.findIndex((ui) => ui.id === event.id);
+function uiMessageReducer(messages, newMessage) {
+  const message = messages.find(m => m.id === newMessage.id);
 
-  let processedEvent;
-  if (index !== -1) {
-    processedEvent = event.metadata.merge
-      ? { ...event, props: { ...state[index].props, ...event.props } }
-      : event;
-    state[index] = processedEvent;
+  if (message) {
+    message.props = { ...message.props, ...newMessage.props };
   } else {
-    processedEvent = event;
-    state.push(processedEvent);
+    messages.push({
+      id: newMessage.id,
+      type: "UIMessage",
+      name: newMessage.name,
+      props: newMessage.props,
+      metadata: newMessage.metadata,
+    });
   }
-  return { state, processedEvent };
+  return messages;
+}
+
+function uiPropMessageReducer(messages, propMessage) {
+  const message = messages.find(m => m.id === propMessage.id);
+
+  if (message) {
+    message.props[propMessage.prop] += propMessage.value;
+  } else {
+    console.log("UI Prop message received without corresponding UI message:", propMessage);
+  }
+
+  return messages;
 }
 
 export function useStream(options) {
@@ -43,37 +60,32 @@ export function useStream(options) {
   }, [options.threadId]);
 
   const submit = async (input) => {
+    setValues(values => ({ ...values, messages: [...values.messages, { id: Date.now(), type: "HumanMessage", content: input.message }] }));
+
     const stream = client.runs.stream(input);
 
-    for await (const { event, data } of stream) {
-      if (event === "values") {
-        setValues(data);
-      }
-      if (event === "custom") {
-        switch (data.type) {
-          case "ui":
-            setValues(values => {
-              const { state: ui, processedEvent } = uiMessageReducer(values.ui ?? [], data);
-
-              if (options.onUIEvent) {
-                options.onUIEvent(processedEvent);
-              }
-
-              return { ...values, ui };
-            });
-
-            break;
-          default:
-            console.warn("Unknown custom event type:", data.type);
-        }
-      }
-      if (event === "messages") {
-        const [message] = data;
-
+    for await (const data of stream) {
+      if (data.type === "AIMessageChunk") {
         setValues(values => {
-          const messages = messageReducer(values.messages ?? [], message);
+          const messages = messageReducer(values.messages, data);
 
           return { ...values, messages };
+        });
+      }
+
+      if (data.type === "UIMessageChunk") {
+        setValues(values => {
+          const ui = uiMessageReducer(values.ui, data);
+
+          return { ...values, ui };
+        });
+      }
+
+      if (data.type === "UIPropMessageChunk") {
+        setValues(values => {
+          const ui = uiPropMessageReducer(values.ui, data);
+
+          return { ...values, ui };
         });
       }
     }

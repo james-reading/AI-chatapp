@@ -81,24 +81,10 @@ class StreamIterator {
 
       if (done) break;
 
-      let currentEvent
       const lines = value.split('\n');
       for (const line of lines) {
         if (line.trim()) {
-          const colonIndex = line.indexOf(':');
-
-          if (colonIndex !== -1) {
-            const field = line.substring(0, colonIndex).trim();
-            const eventValue = line.substring(colonIndex + 1).trim();
-
-            currentEvent ||= {};
-            currentEvent[field] = field === "data" ? JSON.parse(eventValue) : eventValue;
-          }
-        } else {
-          if (currentEvent) {
-            yield currentEvent;
-            currentEvent = undefined;
-          }
+          yield JSON.parse(line);
         }
       }
     }
