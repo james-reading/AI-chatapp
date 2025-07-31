@@ -18,16 +18,32 @@ from langgraph.types import Command
 from langgraph.config import get_stream_writer
 from langgraph.graph.ui import AnyUIMessage, ui_message_reducer, push_ui_message
 from langchain.load.dump import dumps
+from langgraph.types import interrupt, Command
 
 from config import Settings
 
+
 class RequestParams(BaseModel):
-    message: str
+    message: str | None = None
+    command: dict | None = None
     thread_id: str
+
 
 class AgentState(MessagesState):
     ui: Annotated[Sequence[AnyUIMessage], ui_message_reducer]
-    topic: str
+
+
+class QuestionOption(BaseModel):
+    """Model for a multiple-choice option."""
+    value: str = Field(..., description="The text of the option.")
+
+
+class Question(BaseModel):
+    """Model for a question."""
+    title: str = Field(..., description="The title of the question.")
+    options: list[QuestionOption] = Field(..., description="List of multiple-choice options for the question.")
+    correct_option_index: int = Field(..., description="Index of the correct option, starting from 0.")
+
 
 app = FastAPI()
 
@@ -40,106 +56,45 @@ app.add_middleware(
     allow_headers=["*"],  # Allows all headers
 )
 
+
 model = init_chat_model("gpt-4.1", model_provider="openai", api_key=Settings().openai_api_key)
 
-@tool
-def create_story(tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
-    """Create a story"""
-    return Command(
-        goto="story_agent",
-        update={
-            "messages": [
-                ToolMessage(f"Transferred to story agent", tool_call_id=tool_call_id)
-            ]
+
+def human_approval(state: AgentState):
+    is_approved = interrupt(
+        {
+            "question": "Is this good?",
+            # Surface the output that should be
+            # reviewed and approved by the human.
         }
     )
 
-@tool
-def create_question(topic: Annotated[str, "The topic of the question"], tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
-    """Create a question"""
-    return Command(
-        goto="question_agent",
-        update={
-            "topic": topic,
-            "messages": [
-                ToolMessage(f"Transferred to question agent", tool_call_id=tool_call_id)
-            ]
-        }
-    )
-
-async def story_agent(state: AgentState):
-    writer = get_stream_writer()
-
-    content_stream = model.with_config({"tags": ["nostream"]}).astream(
-        "Create a short story"
-    )
-
-    # Find the last AI message that called the tool
-    calling_message = None
-    for message in reversed(state["messages"]):
-        if isinstance(message, AIMessage) and message.tool_calls:
-            calling_message = message
-            break
-
-
-    ui_message = push_ui_message("story", { "content": ""}, message=calling_message)
-
-    content = None
-    async for chunk in content_stream:
-        content = content + chunk if content else chunk
-
-        writer({
-            "type": "UIPropMessageChunk",
-            "id": ui_message["id"],
-            "name": "story",
-            "prop": "content",
-            "value": chunk.text(),
-        })
-
-    ui_message = push_ui_message("story", { "content": content.text(), "complete": True}, id=ui_message["id"], message=calling_message)
-
-    return {"messages": [calling_message]}
-
-async def question_agent(state: AgentState):
-    class Question(BaseModel):
-        """A trivia multiple-choice question."""
-
-        title: str = Field(..., description="The title of the question")
-        options: list[str] = Field(..., description="The options for the question")
-        correct_option_index: int = Field(..., description="The index of the correct option")
-
-    model_with_tools = model.bind_tools([Question], tool_choice="Question")
-    content_stream = model_with_tools.with_config({"tags": ["nostream"]}).astream(
-        f"Create a trivia question on the topic: {state['topic']}"
-    )
-
-    # Find the last AI message that called the tool
-    calling_message = None
-    for message in reversed(state["messages"]):
-        if isinstance(message, AIMessage) and message.tool_calls:
-            calling_message = message
-            break
-
-    ui_message = push_ui_message("question", {}, message=calling_message)
-
-    content = None
-    async for chunk in content_stream:
-        content = content + chunk if content else chunk
-
-        push_ui_message(
-            "question",
-            content.tool_calls[0]["args"],
-            id=ui_message["id"],
-            message=calling_message
-        )
+    print(f"Human approval received: {is_approved}")
+    return Command(goto="chat")
 
 async def chat(state: AgentState):
-    content = """Help the user create storys and questions. Do so by calling the relevant tools.
+    prompt = """You are a helpful AI assistant whose job is to help write trivia questions.
 
-If the user asks for another story or question, call the relevant tool again."""
-    messages = [SystemMessage(content=content)] + state["messages"]
-    model_with_tools = model.bind_tools([create_story, create_question])
-    message = await model_with_tools.ainvoke(state["messages"])
+You must do so by using the relevant tools provided to you.
+
+If the user asks for multiple questions, you must call the tool once at time. Call the tool again immediately after receiving the response from the tool call."""
+    messages = [SystemMessage(content=prompt)] + state["messages"]
+    model_with_tools = model.bind_tools([Question])
+    content_stream = model_with_tools.astream(messages)
+
+    message = None
+    ui_message = None
+    async for chunk in content_stream:
+        message = message + chunk if message else chunk
+
+        for tool_call in message.tool_calls:
+            ui_message = push_ui_message(
+                tool_call["name"],
+                tool_call["args"],
+                id=ui_message["id"] if ui_message else None,
+                message=message
+            )
+
     return {"messages": [message]}
 
 def should_continue(state):
@@ -151,29 +106,47 @@ def should_continue(state):
 
 workflow = StateGraph(AgentState)
 workflow.add_node(chat)
-workflow.add_node(story_agent)
-workflow.add_node(question_agent)
-workflow.add_node("tools", ToolNode([create_story, create_question]))
+workflow.add_node(human_approval)
+workflow.add_node("tools", ToolNode([Question]))
 
 workflow.add_edge(START, "chat")
 workflow.add_conditional_edges("chat", should_continue, ["tools", END])
-workflow.add_edge("tools", END)
+workflow.add_edge("tools", "human_approval")
 
 memory = MemorySaver()
 graph = workflow.compile(checkpointer=memory)
 
-def config(thread_id):
-    return {"configurable": {"thread_id": thread_id}}
+def graph_input(request: RequestParams):
+    if request.message:
+        input_messages = [HumanMessage(request.message)]
+
+        return {"messages": input_messages}
+
+    if request.command:
+        return Command(update=request.command["update"], resume={"foo": "bar"})
 
 def serialize_values(values):
-    messages = [message.dict() for message in values.get("messages", []) if not isinstance(message, ToolMessage)]
-    ui = values.get("ui", [])
-    return {"messages": messages, "ui": ui}
+    messages = []
+    for message in values.get("messages", []):
+        if isinstance(message, AIMessage):
+            messages.append({
+                "id": message.id,
+                "type": "AIMessage",
+                "content": message.content
+            })
+        if isinstance(message, HumanMessage):
+            messages.append({
+                "id": message.id,
+                "type": "HumanMessage",
+                "content": message.content
+            })
+    return {"messages": messages, "ui": values.get("ui", [])}
 
 async def stream_response(request: RequestParams):
-    input_messages = [HumanMessage(request.message)]
+    input = graph_input(request)
+    config = {"configurable": {"thread_id": request.thread_id}}
 
-    async for stream_mode, chunk in graph.astream({"messages": input_messages}, config(request.thread_id), stream_mode=["messages", "custom"]):
+    async for stream_mode, chunk in graph.astream(input, config, stream_mode=["messages", "custom", "values"]):
         if stream_mode == "messages":
             (message, metadata) = chunk
 
@@ -189,8 +162,6 @@ async def stream_response(request: RequestParams):
               "content": message.content,
             }
 
-            yield f"{json.dumps(data)}\n"
-
         elif stream_mode == "custom":
             if chunk.get("type") == "ui":
                 data = {
@@ -200,9 +171,11 @@ async def stream_response(request: RequestParams):
                     "props": chunk["props"],
                     "metadata": chunk["metadata"]
                 }
-                yield f"{json.dumps(data)}\n"
-            else:
-                yield f"{json.dumps(chunk)}\n"
+
+        if stream_mode == "values":
+            data = { "type": "values", "values": serialize_values(chunk) }
+
+        yield f"{json.dumps(data)}\n"
 
 @app.post("/")
 async def chat(request: RequestParams):
@@ -210,20 +183,5 @@ async def chat(request: RequestParams):
 
 @app.get("/thread/{thread_id}")
 async def get_thread(thread_id: str):
-    state = graph.get_state(config(thread_id))
-
-    messages = []
-    for message in state.values.get("messages", []):
-        if isinstance(message, AIMessage):
-            messages.append({
-                "id": message.id,
-                "type": "AIMessage",
-                "content": message.content
-            })
-        if isinstance(message, HumanMessage):
-            messages.append({
-                "id": message.id,
-                "type": "HumanMessage",
-                "content": message.content
-            })
-    return {"messages": messages, "ui": state.values.get("ui", [])}
+    state = graph.get_state({"configurable": {"thread_id": thread_id}})
+    return serialize_values(state.values)

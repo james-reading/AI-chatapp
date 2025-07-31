@@ -66,6 +66,7 @@ class StreamIterator {
       },
       body: JSON.stringify({
         message: this.input.message,
+        command: this.input.command,
         thread_id: this.threadId
       }),
     });

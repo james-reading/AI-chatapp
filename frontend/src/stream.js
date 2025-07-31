@@ -60,7 +60,9 @@ export function useStream(options) {
   }, [options.threadId]);
 
   const submit = async (input) => {
-    setValues(values => ({ ...values, messages: [...values.messages, { id: Date.now(), type: "HumanMessage", content: input.message }] }));
+    if (input.message) {
+      setValues(values => ({ ...values, messages: [...values.messages, { id: Date.now(), type: "HumanMessage", content: input.message }] }));
+    }
 
     const stream = client.runs.stream(input);
 
@@ -87,6 +89,10 @@ export function useStream(options) {
 
           return { ...values, ui };
         });
+      }
+
+      if (data.type === "values") {
+        setValues(data.values);
       }
     }
   }

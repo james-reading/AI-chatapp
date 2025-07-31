@@ -12,48 +12,79 @@ export default function App() {
     threadId: params.get("threadId") || Date.now().toString()
   });
 
-  const currentStory = thread.values.ui?.find((ui) => ui.name === "story");
+  const [questions, setQuestions] = useState([]);
+
+  const acceptQuestion = question => {
+    setQuestions((prevQuestions) => [...prevQuestions, question]);
+    thread.submit({
+      command: {
+        update: {
+          ui: [
+            {
+              ...question,
+              props: {
+                ...question.props,
+                accepted: true
+              }
+            }
+          ]
+        }
+      }
+    });
+  };
+
+  const previewQuestion = thread.values.ui?.filter((ui) => ui.name === "Question" && !ui.props.accepted).at(-1);
 
   return (
-    <div className="max-w-4xl mx-auto px-8 bg-white">
-      {currentStory && (
-        <div className="fixed top-0 left-0 bg-white m-8 p-4 whitespace-pre-wrap max-w-xl">
-          <div>
-            <div className="mb-8">
-              {currentStory.props.complete ? "Done ✅" : "Writing story..."}
-            </div>
-            <div>
-              {currentStory.props.content}
-            </div>
-          </div>
+    <div className="h-screen max-h-screen grid grid-cols-3">
+      <div className="px-8">
+        <div className="text-center text-2xl font-bold mt-4 mb-8">
+          Lab Builder State
         </div>
-      )}
-      <div className="h-screen max-h-screen flex flex-col" >
-        <div className="grow overflow-y-auto mt-16">
+        <div className="flex flex-col gap-y-4">
+          {questions.map(question => (
+            <Question
+              key={question.id}
+              props={question.props}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="px-8 border-l border-r border-gray-400">
+        <div className="text-center text-2xl font-bold mt-4 mb-8">
+          UI Previews
+        </div>
+        {previewQuestion && (
+          <Question
+            key={previewQuestion.id}
+            props={previewQuestion.props}
+            onAccept={() => acceptQuestion(previewQuestion)}
+          />
+        )}
+      </div>
+      <div className="px-8 flex flex-col" >
+        <div className="text-center text-2xl font-bold mt-4 mb-8">
+          Chat
+        </div>
+        <div className="grow overflow-y-auto">
           {thread.messages.map((message,) => (
             <div key={message.id}>
               {message.type === "HumanMessage" ? (
                 <div className="text-right mb-8">
-                  <span className="inline-block bg-gray-100 px-6 py-3 rounded-full">{message.content}</span>
+                  <span className="inline-block bg-gray-200 px-6 py-3 rounded-full">{message.content}</span>
                 </div>
               ) : (
                 <div className="mb-8">
                   <div>{message.content}</div>
                   {thread.values.ui?.filter((ui) => ui.metadata?.message_id === message.id).map((ui) => {
                     switch (ui.name) {
-                      case "question":
+                      case "Question":
                         return (
-                          <Question
-                            key={ui.id}
-                            props={ui.props}
-                          />
-                        );
-                      case "story":
-                        return (
-                          <div key={ui.id} className="">
-                            <span className="inline-block bg-gray-900 text-white px-4 py-2 rounded-full">
-                              {ui.props.complete ? "Created story ✅" : "Writing story..."}
-                            </span>
+                          <div key={ui.id} className="border p-5 rounded-xl border-gray-300 bg-gray-50 flex justify-between">
+                            <div>Created Question</div>
+                            {ui.props.accepted && (
+                              <div className="font-bold">Accepted</div>
+                            )}
                           </div>
                         );
                       default:
