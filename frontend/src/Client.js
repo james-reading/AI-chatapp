@@ -59,15 +59,13 @@ class StreamIterator {
   }
 
   async *[Symbol.asyncIterator]() {
-    const response = await fetch(`${this.apiUrl}/`, {
+    const response = await fetch(`${this.apiUrl}/thread/${this.threadId}/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        message: this.input.message,
-        command: this.input.command,
-        thread_id: this.threadId
+        input: this.input
       }),
     });
 

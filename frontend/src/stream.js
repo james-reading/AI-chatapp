@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Client } from "./client.js";
 
@@ -18,50 +18,45 @@ function messageReducer(messages, newMessage) {
 }
 
 function uiMessageReducer(messages, newMessage) {
-  const message = messages.find(m => m.id === newMessage.id);
+  let message = messages.find(m => m.id === newMessage.id);
 
   if (message) {
     message.props = { ...message.props, ...newMessage.props };
   } else {
-    messages.push({
+    message = {
       id: newMessage.id,
       type: "UIMessage",
       name: newMessage.name,
       props: newMessage.props,
       metadata: newMessage.metadata,
-    });
+    }
+    messages.push(message);
   }
-  return messages;
-}
-
-function uiPropMessageReducer(messages, propMessage) {
-  const message = messages.find(m => m.id === propMessage.id);
-
-  if (message) {
-    message.props[propMessage.prop] += propMessage.value;
-  } else {
-    console.log("UI Prop message received without corresponding UI message:", propMessage);
-  }
-
-  return messages;
+  return [message, messages];
 }
 
 export function useStream(options) {
-  const [values, setValues] = useState({});
+  const [values, setValues] = useState({
+    messages: [],
+    ui: [],
+    lab: {}
+  });
 
   const client = new Client({ apiUrl: options.apiUrl, threadId: options.threadId });
 
-  useEffect(() => {
-    async function fetchThread() {
-      const thread = await client.threads.get(options.threadId);
-      setValues(thread);
-    }
-    fetchThread();
-  }, [options.threadId]);
-
   const submit = async (input) => {
     if (input.message) {
-      setValues(values => ({ ...values, messages: [...values.messages, { id: Date.now(), type: "HumanMessage", content: input.message }] }));
+      setValues(values => {
+        let messages = values.messages;
+
+        messages.push({
+          id: Date.now(),
+          type: "HumanMessage",
+          content: input.message
+        })
+
+        return { ...values, messages };
+      })
     }
 
     const stream = client.runs.stream(input);
@@ -77,22 +72,14 @@ export function useStream(options) {
 
       if (data.type === "UIMessageChunk") {
         setValues(values => {
-          const ui = uiMessageReducer(values.ui, data);
+          const [uiEvent, ui] = uiMessageReducer(values.ui, data);
+
+          if (options.onUIEvent) {
+            options.onUIEvent(uiEvent);
+          }
 
           return { ...values, ui };
         });
-      }
-
-      if (data.type === "UIPropMessageChunk") {
-        setValues(values => {
-          const ui = uiPropMessageReducer(values.ui, data);
-
-          return { ...values, ui };
-        });
-      }
-
-      if (data.type === "values") {
-        setValues(data.values);
       }
     }
   }

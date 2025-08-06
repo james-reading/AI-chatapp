@@ -1,5 +1,6 @@
 from typing import Annotated
 from operator import add
+from pydantic import BaseModel, Field
 
 from langchain.chat_models import init_chat_model
 from langchain_core.messages import SystemMessage, ToolMessage, AIMessage, RemoveMessage
@@ -12,14 +13,29 @@ from langgraph.graph import START, END, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, InjectedState
 from langgraph.types import Command
 
-from config.settings import Settings
-from models import LabRequirements, Question
-
-# class MyCustomHandler(BaseCallbackHandler):
-#     def on_llm_new_token(self, token: str, **kwargs) -> None:
-#         print(f"My custom handler, token: {token}")
+from config import Settings
 
 llm = init_chat_model("gpt-4.1", model_provider="openai", api_key=Settings().openai_api_key)
+
+class LabRequirements(BaseModel):
+    """Requirements needed to create a lab."""
+
+    topic: str = Field(description="The topic of the lab")
+    target_persona: str = Field(description="Who s the lab for?")
+    difficulty_level: int = Field(default=1, ge=1, le=7, description="Difficulty level of the lab")
+
+class QuestionOption(BaseModel):
+    """An option for a question."""
+    value: str = Field(description="The text of the option")
+
+class Question(BaseModel):
+    """A question to ask the user."""
+
+    title: str = Field(description="The title of the question")
+    options: list[QuestionOption] = Field(description="The multiple-choice options for the question")
+    correct_option: int = Field(
+        ge=0, description="The index of the correct option in the options list"
+    )
 
 class State(MessagesState):
     step: str
