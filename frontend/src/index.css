@@ -1,2 +1,7 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
+
+.overflow-y-auto {
+  scrollbar-color: theme('colors.gray.200') transparent;
+  scrollbar-gutter: stable both-edges;
+}

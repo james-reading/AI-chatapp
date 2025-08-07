@@ -1,21 +1,23 @@
 export class Client {
-  constructor({ apiUrl, threadId }) {
-    this.apiUrl = apiUrl;
-    this.threadId = threadId
-    this.threads = new ThreadsAPI(apiUrl);
-    this.runs = new RunsAPI(apiUrl, threadId);
+  constructor({ apiUrl, token }) {
+    this.threads = new ThreadsAPI(apiUrl, token);
+    this.runs = new RunsAPI(apiUrl, token);
   }
 }
 
 class ThreadsAPI {
-  constructor(apiUrl) {
+  constructor(apiUrl, token) {
     this.apiUrl = apiUrl;
+    this.token = token;
   }
 
   async get(threadId) {
-    const response = await fetch(`${this.apiUrl}/thread/${threadId}`, {
+    const response = await fetch(`${this.apiUrl}/v1/threads/${threadId}`, {
       method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.token}`
+      }
     });
 
     if (!response.ok) {
@@ -26,10 +28,12 @@ class ThreadsAPI {
   }
 
   async create() {
-    const response = await fetch(`${this.apiUrl}/threads`, {
+    const response = await fetch(`${this.apiUrl}/v1/threads`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: "{}",
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.token}`
+      }
     });
 
     if (!response.ok) {
@@ -41,31 +45,21 @@ class ThreadsAPI {
 }
 
 class RunsAPI {
-  constructor(apiUrl, threadId) {
+  constructor(apiUrl, token) {
     this.apiUrl = apiUrl;
-    this.threadId = threadId;
+    this.token = token;
   }
 
-  stream(input) {
-    return new StreamIterator(this.apiUrl, this.threadId, input);
-  }
-}
-
-class StreamIterator {
-  constructor(apiUrl, threadId, input) {
-    this.apiUrl = apiUrl;
-    this.threadId = threadId;
-    this.input = input;
-  }
-
-  async *[Symbol.asyncIterator]() {
-    const response = await fetch(`${this.apiUrl}/thread/${this.threadId}/stream`, {
+  async *stream(threadId, assistantId, input) {
+    const response = await fetch(`${this.apiUrl}/v1/threads/${threadId}/run/stream`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        'Authorization': `Bearer ${this.token}`
       },
       body: JSON.stringify({
-        input: this.input
+        assistant_id: assistantId,
+        input: input
       }),
     });
 
@@ -81,6 +75,7 @@ class StreamIterator {
       if (done) break;
 
       const lines = value.split('\n');
+
       for (const line of lines) {
         if (line.trim()) {
           yield JSON.parse(line);

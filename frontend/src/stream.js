@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 import { Client } from "./client.js";
 
@@ -18,48 +18,94 @@ function messageReducer(messages, newMessage) {
 }
 
 function uiMessageReducer(messages, newMessage) {
-  let message = messages.find(m => m.id === newMessage.id);
+  const message = messages.find(m => m.id === newMessage.id);
 
   if (message) {
     message.props = { ...message.props, ...newMessage.props };
   } else {
-    message = {
+    messages.push({
       id: newMessage.id,
       type: "UIMessage",
       name: newMessage.name,
       props: newMessage.props,
       metadata: newMessage.metadata,
-    }
-    messages.push(message);
+    });
   }
-  return [message, messages];
+  return messages;
+}
+
+function getAuthToken() {
+  let token = localStorage.getItem("ais:token");
+
+  if (!token) {
+    token = prompt("Enter your auth token");
+
+    if (token) {
+      localStorage.setItem("ais:token", token);
+    }
+  }
+
+  return token;
 }
 
 export function useStream(options) {
   const [values, setValues] = useState({
     messages: [],
     ui: [],
-    lab: {}
   });
 
-  const client = new Client({ apiUrl: options.apiUrl, threadId: options.threadId });
+  const token = getAuthToken();
+  const threadId = localStorage.getItem("ais:threadId");
+  const client = new Client({ apiUrl: options.apiUrl, token: token });
+
+  useEffect(() => {
+    if (threadId) {
+      client.threads.get(threadId).then(thread => {
+        if (thread.values) {
+          setValues(thread.values)
+        }
+      });
+    }
+  }, [threadId]);
+
+  const ensureThread = async () => {
+    if (!threadId) {
+      const thread = await client.threads.create();
+
+      localStorage.setItem("ais:threadId", thread.threadId);
+      return thread.threadId;
+    }
+    return threadId;
+  };
+
+  const reset = () => {
+    localStorage.removeItem("ais:threadId");
+    setValues({
+      messages: [],
+      ui: [],
+    });
+  };
 
   const submit = async (input) => {
+    const currentThreadId = await ensureThread();
+
     if (input.message) {
       setValues(values => {
         let messages = values.messages;
 
         messages.push({
-          id: Date.now(),
+          id: crypto.randomUUID(),
           type: "HumanMessage",
           content: input.message
         })
 
         return { ...values, messages };
       })
+
+      setTimeout(() => options.onNewHumanMessage(), 0);
     }
 
-    const stream = client.runs.stream(input);
+    const stream = client.runs.stream(currentThreadId, options.assistantId, input);
 
     for await (const data of stream) {
       if (data.type === "AIMessageChunk") {
@@ -72,11 +118,7 @@ export function useStream(options) {
 
       if (data.type === "UIMessageChunk") {
         setValues(values => {
-          const [uiEvent, ui] = uiMessageReducer(values.ui, data);
-
-          if (options.onUIEvent) {
-            options.onUIEvent(uiEvent);
-          }
+          const ui = uiMessageReducer(values.ui, data);
 
           return { ...values, ui };
         });
@@ -86,11 +128,15 @@ export function useStream(options) {
 
   return {
     submit,
+    reset,
     get values() {
       return values;
     },
     get messages() {
       return values.messages || [];
+    },
+    get threadId() {
+      return threadId;
     },
   }
 }
